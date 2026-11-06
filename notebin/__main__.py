@@ -1,6 +1,6 @@
 import argparse
 
-from .store import demo_store, list_notes
+from .store import demo_store, export_notes, list_notes
 
 
 def show_notes(db, owner):
@@ -18,6 +18,8 @@ def main():
     commands.add_parser("demo", help="show Alice's sample notes")
     listing = commands.add_parser("list", help="list one user's sample notes")
     listing.add_argument("owner")
+    exporting = commands.add_parser("export", help="export one user's sample notes as CSV")
+    exporting.add_argument("owner")
     args = parser.parse_args()
     db = demo_store()
     try:
@@ -25,6 +27,9 @@ def main():
             show_notes(db, "alice")
         elif args.command == "list":
             show_notes(db, args.owner)
+        elif args.command == "export":
+            print(f"CSV export for {args.owner}:")
+            print(export_notes(db, args.owner), end="")
     finally:
         db.close()
 
