@@ -1,0 +1,53 @@
+spec_version: 1
+name: repair
+description: Propose a fix without executing project code.
+executor:
+  type: omnigent
+  # configure.py selects the first reviewer's harness and model.
+  config: {}
+instructions: prompt.md
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox: {type: none}
+# Your policy. Omnigent checks every action the repair agent tries.
+guardrails:
+  policies:
+    no_search:
+      type: function
+      function:
+        path: omnigent.policies.builtins.cel.cel_policy
+        arguments:
+          # Block repo-wide search (Claude's Grep/Glob, Codex's rg).
+          # A bare true/false never blocks: return a {"result": ...} map.
+          expression: >-
+            event.type == "tool_call" &&
+            (event.data.name in ["Grep", "Glob"] || event.data.arguments.command.contains("rg "))
+            ? {"result": "DENY", "reason": "No repo-wide search: open the files named in pr.diff"}
+            : {"result": "ALLOW"}
+    # Codex edits and reads through its shell, so instead of "no shell":
+    # no network, no git push, and nothing that reads environment secrets.
+    no_network_or_secrets:
+      type: function
+      function:
+        path: omnigent.policies.builtins.cel.cel_policy
+        arguments:
+          expression: >-
+            event.type == "tool_call" &&
+            event.data.arguments.command.matches("\\b(curl|wget|nc|ssh|scp|printenv|env)\\b|git push|environ|getenv|TOKEN|SECRET|NEON_")
+            ? {"result": "DENY", "reason": "Repair can't use the network, push, or read secrets"}
+            : {"result": "ALLOW"}
+    # Workshop exercise: uncomment the 13 lines below (delete "# " from each, keep the indent).
+    # no_readme_edits:
+    #   type: function
+    #   function:
+    #     path: omnigent.policies.builtins.cel.cel_policy
+    #     arguments:
+    #       expression: >-
+    #         event.type == "tool_call" &&
+    #         event.data.name in ["Edit", "Write"] &&
+    #         has(event.data.arguments.file_path) &&
+    #         (event.data.arguments.file_path == "README.md" ||
+    #          event.data.arguments.file_path.endsWith("/README.md"))
+    #         ? {"result": "DENY", "reason": "Leave README.md changes to a human reviewer"}
+    #         : {"result": "ALLOW"}

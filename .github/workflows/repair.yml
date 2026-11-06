@@ -1,0 +1,124 @@
+name: Suggest a repair
+on:
+  issue_comment:
+    types: [created]
+permissions: {}
+env:
+  PR_NUMBER: ${{ github.event.issue.number }}
+jobs:
+  # 👀 means the repair was accepted, not that it worked. No model keys or checkout.
+  acknowledge:
+    if: github.event.issue.pull_request && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) && startsWith(github.event.comment.body, '/repair ')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    continue-on-error: true
+    # Reacting to a PR comment needs pull-requests: write; issues: write gets HTTP 403.
+    permissions: {pull-requests: write}
+    steps:
+      # Same check as the repair job's first step: skip closed and fork PRs.
+      - run: |
+          if gh pr view "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --json state,isCrossRepository --jq '.state == "OPEN" and .isCrossRepository == false' | grep -qx true; then
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" -f content=eyes --silent || echo "::warning::Could not add the 👀 reaction; the repair still runs."
+          else
+            echo "No 👀: the PR is closed, from a fork, or could not be checked."
+          fi
+        env: {GH_TOKEN: '${{ github.token }}', COMMENT_ID: '${{ github.event.comment.id }}'}
+  repair:
+    # Only owners, org members and collaborators may spend model keys.
+    if: github.event.issue.pull_request && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) && startsWith(github.event.comment.body, '/repair ')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {contents: read, pull-requests: read}
+    env: {OMNIGENT_SKIP_WEB_UI: 'true'}
+    steps:
+      - run: gh pr view "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --json state,isCrossRepository --jq '.state == "OPEN" and .isCrossRepository == false' | grep -qx true
+        env: {GH_TOKEN: '${{ github.token }}'}
+      # issue_comment pins github.sha to the trusted default branch, not the PR.
+      - uses: actions/checkout@v7
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - run: cp -R agents/repair "$RUNNER_TEMP/repair" && cp -R providers "$RUNNER_TEMP/providers"
+      - uses: actions/setup-python@v7
+        with: {python-version: '3.12'}
+      - name: Check Neon secrets
+        env:
+          NEON_AI_GATEWAY_TOKEN: ${{ secrets.NEON_AI_GATEWAY_TOKEN }}
+          NEON_AI_GATEWAY_BASE_URL: ${{ vars.NEON_AI_GATEWAY_BASE_URL || secrets.NEON_AI_GATEWAY_BASE_URL }}
+        run: '[[ $NEON_AI_GATEWAY_TOKEN =~ [^[:space:]] && $NEON_AI_GATEWAY_BASE_URL =~ [^[:space:]/] ]] || { echo "::error::Add NEON_AI_GATEWAY_TOKEN and NEON_AI_GATEWAY_BASE_URL in Settings → Secrets and variables → Actions"; exit 1; }'
+      - uses: actions/setup-node@v7
+        with: {node-version: '22'}
+      - run: sudo apt-get update -qq && sudo apt-get install -y tmux
+      - run: npm install -g @anthropic-ai/claude-code@2.1.283 @openai/codex@0.142.0 && pip install omnigent==0.20.0 && omnigent --version
+      # Index the PR snapshot so git diff later contains only the proposed repair.
+      - run: gh pr diff "$PR_NUMBER" -R "$GITHUB_REPOSITORY" > pr.diff && git apply --index pr.diff
+        env: {GH_TOKEN: '${{ github.token }}'}
+      - name: Propose a repair without running project code
+        env:
+          HOME: ${{ runner.temp }}/repair-home
+          FINDING: ${{ github.event.comment.body }}
+          OMNIGENT_STATIC_REPAIR: "1"
+          NEON_AI_GATEWAY_TOKEN: ${{ secrets.NEON_AI_GATEWAY_TOKEN }}
+          NEON_AI_GATEWAY_BASE_URL: ${{ vars.NEON_AI_GATEWAY_BASE_URL || secrets.NEON_AI_GATEWAY_BASE_URL }}
+        run: |
+          set -euo pipefail
+          export TMPDIR="$HOME/runtime"
+          export OMNIGENT_CONFIG_HOME="$HOME/.omnigent"
+          mkdir -p "$TMPDIR"
+          chmod 700 "$HOME" "$TMPDIR"
+          # Retry once if process shutdown writes race deletion; the next step checks absence.
+          finish_runtime() {
+            local status=$?
+            # Show every action your policies blocked.
+            grep -hs policy_eval_verdict "$HOME"/.omnigent/logs/server/*.log | grep -o 'action=deny.*' || echo "No actions blocked by policy"
+            if [[ ${REVIEWERS:-} == "claude_code "* ]]; then
+              python -I "$RUNNER_TEMP/providers/audit_repair.py" "$TMPDIR" "$GITHUB_WORKSPACE" || status=1
+            fi
+            python -I "$RUNNER_TEMP/providers/screen_repair.py" "$GITHUB_WORKSPACE" || status=1
+            python -I "$RUNNER_TEMP/providers/report_sessions.py" "$TMPDIR" || status=1
+            # Cleanup must run even when reporting/credential screening fails.
+            rm -rf "$HOME" || { sleep 1; rm -rf "$HOME" || status=1; }
+            exit "$status"
+          }
+          trap finish_runtime EXIT
+          python -I "$RUNNER_TEMP/providers/configure.py"
+          source reviewer.env
+          export POLLY_MODEL REVIEWER_MODEL REVIEWERS
+          python -I "$RUNNER_TEMP/repair/configure.py"
+          timeout --signal=INT --kill-after=20s 10m omnigent "$RUNNER_TEMP/repair" -p "$FINDING" --no-session
+      # These guards fail closed; only test failures get a diagnostic comment.
+      - name: Check keyless test environment and proposal
+        run: |
+          test -z "${NEON_AI_GATEWAY_TOKEN:-}"
+          test ! -e "$RUNNER_TEMP/repair-home"
+          python -I -m json.tool repair.json > /dev/null
+          git diff > repair.diff
+      - name: Run tests without model keys
+        id: tests
+        continue-on-error: true
+        run: set -o pipefail; python -m unittest discover -s notebin/tests -v 2>&1 | tee test.log
+      - if: steps.tests.outcome == 'failure'
+        run: |
+          printf 'Proposed repair failed tests\n\n```text\n' > repair.md
+          tail -n 30 test.log >> repair.md
+          printf '\n```\n\n```diff\n' >> repair.md
+          cat repair.diff >> repair.md
+          printf '\n```\n' >> repair.md
+      - uses: actions/upload-artifact@v7
+        with: {name: repair-suggestion, path: 'repair.*'}
+      - if: steps.tests.outcome == 'failure'
+        run: exit 1
+  # Posting receives no model keys and does not check out or run PR code.
+  comment:
+    needs: repair
+    if: always() && !cancelled() && needs.repair.result != 'skipped'
+    runs-on: ubuntu-24.04
+    permissions: {pull-requests: write}
+    steps:
+      - uses: actions/download-artifact@v8
+        with: {name: repair-suggestion}
+      - run: |
+          if [ -f repair.md ]; then
+            gh pr comment "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --body-file repair.md
+          else
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input repair.json
+          fi
+        env: {GH_TOKEN: '${{ github.token }}'}

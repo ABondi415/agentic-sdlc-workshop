@@ -1,0 +1,10 @@
+# Edit on main, then close and reopen the PR.
+# polly / polly_model: the coordinator. It hands out the review and merges the findings; it reviews nothing itself.
+# reviewers: the agents that review, each with its own model. Remove a line for a single review.
+# /repair uses the first reviewer.
+neon:
+  polly: claude-sdk
+  polly_model: claude-sonnet-5-5
+  reviewers:
+    - {agent: claude_code, model: claude-sonnet-5-5}
+    - {agent: codex, model: gpt-6-1-sol}
