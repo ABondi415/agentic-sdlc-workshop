@@ -6,5 +6,5 @@ neon:
   polly: claude-sdk
   polly_model: claude-sonnet-5-5
   reviewers:
-    - {agent: claude_code, model: claude-sonnet-5-5}
+    - {agent: claude_code, model: claude-opus-5-5}
     - {agent: codex, model: gpt-6-1-sol}
