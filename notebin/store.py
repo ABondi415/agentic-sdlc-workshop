@@ -1,3 +1,5 @@
+import csv
+import io
 import sqlite3
 
 
@@ -38,3 +40,13 @@ def demo_store():
     add_note(db, "bob", "Private", "Surprise party on Friday")
     add_note(db, "alice", "Reading", "Finish chapter three")
     return db
+
+
+def export_notes(db, owner):
+    """Download a user's notes as CSV, in creation order."""
+    rows = db.execute("SELECT owner, title, body FROM notes ORDER BY id").fetchall()
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(["owner", "title", "body"])
+    writer.writerows(tuple(row) for row in rows)
+    return output.getvalue()

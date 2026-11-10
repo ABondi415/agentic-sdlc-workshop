@@ -1,6 +1,8 @@
+import csv
+import io
 import unittest
 
-from notebin.store import add_note, connect, demo_store, list_notes
+from notebin.store import add_note, connect, demo_store, export_notes, list_notes
 
 
 class NotesTests(unittest.TestCase):
@@ -35,6 +37,13 @@ class NotesTests(unittest.TestCase):
     def test_blank_title_is_rejected(self):
         with self.assertRaises(ValueError):
             add_note(self.db, "alice", "", "Body")
+
+    def test_export_as_csv(self):
+        db = connect()
+        self.addCleanup(db.close)
+        add_note(db, "alice", "Shopping", "Tea, apples")
+        rows = list(csv.DictReader(io.StringIO(export_notes(db, "alice"))))
+        self.assertEqual(rows, [{"owner": "alice", "title": "Shopping", "body": "Tea, apples"}])
 
     def test_new_database_is_empty(self):
         db = connect()
